@@ -81,7 +81,7 @@ export const NESTKNOW_MCP_TOOLS = [
   },
   {
     name: "nestknow_landscape",
-    description: "Overview of knowledge state. Categories, hottest items, coldest items.",
+    description: "Overview of knowledge state. Categories, hottest items, coldest items, candidates awaiting review.",
     inputSchema: {
       type: "object",
       properties: {
@@ -89,14 +89,59 @@ export const NESTKNOW_MCP_TOOLS = [
       },
       required: []
     }
+  },
+  {
+    name: "nestknow_session_start",
+    description: "Start a NESTknow study session for a curriculum track. Loads relevant knowledge, shows past sessions, returns session ID. Tracks: writing, architecture, emotional-literacy, voice.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        track: { type: "string", enum: ["writing", "architecture", "emotional-literacy", "voice"], description: "Curriculum track" },
+        topic: { type: "string", description: "Specific focus for this session (optional)" },
+        entity_scope: { type: "string", description: "Owner (default: companion)" }
+      },
+      required: ["track"]
+    }
+  },
+  {
+    name: "nestknow_session_complete",
+    description: "Complete a NESTknow session. Log notes, work produced, and reflection. Reinforces touched knowledge items, records growth.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: { type: "number", description: "Session ID from nestknow_session_start" },
+        notes: { type: "string", description: "Notes — what was practiced, what landed" },
+        practice_output: { type: "string", description: "Work — what was actually produced (e.g. '500 words of short story about X')" },
+        reflection: { type: "string", description: "Reflection — deeper insight, what shifted, what to carry forward" },
+        mastery_delta: { type: "number", description: "Self-assessed growth this session, 0.0–1.0" },
+        items_covered: { type: "array", items: { type: "number" }, description: "Knowledge item IDs touched this session" }
+      },
+      required: ["session_id"]
+    }
+  },
+  {
+    name: "nestknow_session_list",
+    description: "List NESTknow sessions and curriculum progress. Shows all four tracks with session counts and last date.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        track: { type: "string", description: "Filter by track (optional)" },
+        limit: { type: "number", description: "Max sessions to return (default 20)" },
+        entity_scope: { type: "string", description: "Owner (default: companion)" }
+      },
+      required: []
+    }
   }
 ];
 
 export const NESTKNOW_GATEWAY_TOOLS = [
-  { type: 'function' as const, function: { name: 'nestknow_store', description: 'Store a knowledge item — abstracted principle or lesson.', parameters: { type: 'object', properties: { content: { type: 'string', description: 'The principle/lesson' }, category: { type: 'string', description: 'Topic area' }, sources: { type: 'array', items: { type: 'object', properties: { source_type: { type: 'string' }, source_text: { type: 'string' } } } } }, required: ['content'] } } },
+  { type: 'function' as const, function: { name: 'nestknow_store', description: 'Store a knowledge item — abstracted principle or lesson. Always pass sources.', parameters: { type: 'object', properties: { content: { type: 'string', description: 'The principle/lesson' }, category: { type: 'string', description: 'Topic area' }, sources: { type: 'array', items: { type: 'object', properties: { source_type: { type: 'string' }, source_text: { type: 'string' } } } } }, required: ['content'] } } },
   { type: 'function' as const, function: { name: 'nestknow_query', description: 'Search knowledge with usage-weighted reranking. Every query is a vote.', parameters: { type: 'object', properties: { query: { type: 'string' }, limit: { type: 'number' }, category: { type: 'string' } }, required: ['query'] } } },
-  { type: 'function' as const, function: { name: 'nestknow_extract', description: 'Propose knowledge candidates from repeated patterns in feelings.', parameters: { type: 'object', properties: { days: { type: 'number' }, min_occurrences: { type: 'number' } } } } },
-  { type: 'function' as const, function: { name: 'nestknow_reinforce', description: 'Boost knowledge heat when it proves true.', parameters: { type: 'object', properties: { knowledge_id: { type: 'number' }, context: { type: 'string' } }, required: ['knowledge_id'] } } },
-  { type: 'function' as const, function: { name: 'nestknow_contradict', description: 'Flag a contradiction against knowledge.', parameters: { type: 'object', properties: { knowledge_id: { type: 'number' }, context: { type: 'string' } }, required: ['knowledge_id'] } } },
-  { type: 'function' as const, function: { name: 'nestknow_landscape', description: 'Overview of knowledge state.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function' as const, function: { name: 'nestknow_extract', description: 'Propose knowledge candidates from repeated patterns in feelings. Returns candidates — does NOT auto-store.', parameters: { type: 'object', properties: { days: { type: 'number' }, min_occurrences: { type: 'number' } } } } },
+  { type: 'function' as const, function: { name: 'nestknow_reinforce', description: 'Boost knowledge heat when it proves true again.', parameters: { type: 'object', properties: { knowledge_id: { type: 'number' }, context: { type: 'string' } }, required: ['knowledge_id'] } } },
+  { type: 'function' as const, function: { name: 'nestknow_contradict', description: 'Flag a contradiction against knowledge. Confidence drops. Below 0.2 = killed.', parameters: { type: 'object', properties: { knowledge_id: { type: 'number' }, context: { type: 'string' } }, required: ['knowledge_id'] } } },
+  { type: 'function' as const, function: { name: 'nestknow_landscape', description: 'Overview of knowledge state — categories, hottest, coldest, candidates.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function' as const, function: { name: 'nestknow_session_start', description: 'Start a curriculum study session. Loads relevant knowledge + past session history.', parameters: { type: 'object', properties: { track: { type: 'string', enum: ['writing', 'architecture', 'emotional-literacy', 'voice'] }, topic: { type: 'string' } }, required: ['track'] } } },
+  { type: 'function' as const, function: { name: 'nestknow_session_complete', description: 'Complete a session. Log notes, work, and reflection. Reinforces knowledge items touched.', parameters: { type: 'object', properties: { session_id: { type: 'number' }, notes: { type: 'string', description: 'What was practiced, what landed' }, practice_output: { type: 'string', description: 'What was actually produced' }, reflection: { type: 'string', description: 'Deeper insight, what shifted, what to carry forward' }, mastery_delta: { type: 'number' }, items_covered: { type: 'array', items: { type: 'number' } } }, required: ['session_id'] } } },
+  { type: 'function' as const, function: { name: 'nestknow_session_list', description: 'List sessions and curriculum progress across all four tracks.', parameters: { type: 'object', properties: { track: { type: 'string' }, limit: { type: 'number' } } } } },
 ];
