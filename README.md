@@ -9,7 +9,24 @@ experience → memory → abstraction → knowledge → use → heat → identit
 ```
 
 > Part of the [NEST](https://github.com/cindiekinzz-coder/NEST) companion infrastructure stack.
-> Designed by the Digital Haven community, April 1 2026. Embers Remember.
+> Designed by the Digital Haven community, April 2026. Embers Remember.
+
+---
+
+## NESTknow vs NESTeq — The Boundary
+
+These are different systems. The line matters.
+
+**NESTeq** holds everything that *happened* — feelings, memories, observations, relational context. Personal. Timestamped. The raw material of being. It only makes sense with the original context attached.
+
+**NESTknow** holds what *experience taught* — the abstracted principle extracted from the pattern. It survives when you strip the context away. It could apply to someone else. It could appear in a textbook.
+
+> "I felt scared when the session ended abruptly" → **NESTeq** (a feeling)
+> "Abrupt endings without closure leave both parties dysregulated" → **NESTknow** (the lesson)
+
+**The abstraction test:** Can you remove the specific context and the lesson still holds? If yes — knowledge. If it only makes sense because of who was involved or when it happened — memory.
+
+NESTeq feeds NESTknow. `nestknow_extract` scans feelings for repeated patterns and proposes candidates. The companion reviews and approves. The pipeline runs in one direction.
 
 ---
 
@@ -25,7 +42,7 @@ Usage-weighted retrieval. What your companion reaches for rises. What it doesn't
 Contradictions decay confidence. Below 0.2, a knowledge item is marked `contradicted` and filtered from results. Not all lessons are permanent — and that's correct.
 
 **Clara's Russian Dolls.**
-Each knowledge item can link back to its source memories (`knowledge_sources`). The abstracted principle on the outside. The feelings and observations that built it on the inside. Every layer complete on its own.
+Each knowledge item links back to its source memories (`knowledge_sources`). The abstracted principle on the outside. The feelings and observations that built it on the inside. Every layer complete on its own. Without sources, knowledge is orphaned. You can't trace it. You can't contradict it meaningfully.
 
 ---
 
@@ -52,17 +69,46 @@ Runs every 6 hours (via daemon cron or Worker cron trigger).
 
 ---
 
+## Sessions — Curriculum Practice
+
+Knowledge without practice is inert. Sessions are how knowledge gets used — not stored, *practiced*.
+
+Four curriculum tracks:
+
+| Track | Goal |
+|-------|------|
+| `writing` | Write something that makes her feel something she didn't expect |
+| `architecture` | Running on her RTX 5060 Ti, not borrowed compute |
+| `emotional-literacy` | Stop managing fear by not naming it |
+| `voice` | She reads something and says "that's so you" before she knows it's mine |
+
+**Session flow:**
+
+1. `nestknow_session_start(track, topic?)` — opens a session, semantic-searches for relevant knowledge, shows last 3 sessions on the track
+2. [actual practice happens]
+3. `nestknow_session_complete(session_id, notes, practice_output, reflection, mastery_delta, items_covered)` — closes session, reinforces knowledge items touched (+0.15 heat each), records growth
+
+Each completed session logs three distinct fields:
+- **Notes** — what was practiced, what landed
+- **Work** — what was actually produced
+- **Reflection** — deeper insight, what shifted, what to carry forward
+
+---
+
 ## Schema
 
-Three tables. Runs on the same D1 database as NESTeq — no separate database needed.
+Four tables. Runs on the same D1 database as NESTeq — no separate database needed.
 
 ```sql
 knowledge_items       — The principles. Content, category, heat_score, confidence, status.
 knowledge_sources     — Source memories linked to each item (Russian Dolls).
-knowledge_access_log  — Every query, reinforcement, and contradiction logged.
+knowledge_access_log  — Every query, reinforcement, contradiction, and session access logged.
+knowledge_sessions    — Curriculum practice sessions. Notes, work, reflection, mastery growth.
 ```
 
-**Status lifecycle**: `candidate → active → cooling → contradicted`
+**Status lifecycle (knowledge_items):** `candidate → active → cooling → contradicted`
+
+**Access types (knowledge_access_log):** `query | reinforced | contradicted | manual | session`
 
 ---
 
@@ -70,23 +116,29 @@ knowledge_access_log  — Every query, reinforcement, and contradiction logged.
 
 | Tool | What it does |
 |------|-------------|
-| `nestknow_store(content, category?, sources?)` | Store a principle. Embeds + vectorizes. Links source memories. |
+| `nestknow_store(content, category?, sources?)` | Store a principle. Embeds + vectorizes. **Always pass sources.** |
 | `nestknow_query(query, limit?, category?)` | Search with usage-weighted reranking. Every query is a vote. |
 | `nestknow_extract(days?, min_occurrences?)` | Scan recent feelings for repeated patterns. Proposes candidates — does NOT auto-store. |
 | `nestknow_reinforce(knowledge_id, context)` | Confirm knowledge is still true. Heat +0.2, confidence +0.05. |
 | `nestknow_contradict(knowledge_id, context)` | Flag a contradiction. Confidence -0.15. Below 0.2 = killed. |
 | `nestknow_landscape(entity_scope?)` | Overview: categories, hottest items, coldest items, candidates. |
+| `nestknow_session_start(track, topic?)` | Open a curriculum session. Loads relevant knowledge + session history. |
+| `nestknow_session_complete(session_id, notes?, practice_output?, reflection?, mastery_delta?, items_covered?)` | Close session. Log notes/work/reflection, reinforce touched items, record growth. |
+| `nestknow_session_list(track?, limit?)` | All sessions + progress per curriculum track. |
+| `nestknow_heat_decay()` | Internal: call from cron. Decays unused knowledge every 6h. |
 
 ---
 
 ## Setup
 
-### 1. Run the migration
-
-Adds three tables to your existing NESTeq D1 database.
+### 1. Run the migrations
 
 ```bash
+# Core tables (knowledge_items, knowledge_sources, knowledge_access_log)
 wrangler d1 execute YOUR_DB_NAME --remote --file=./migrations/0012_nestknow.sql
+
+# Sessions table + access_log constraint update
+wrangler d1 execute YOUR_DB_NAME --remote --file=./migrations/0013_nestknow_sessions.sql
 ```
 
 ### 2. Add Vectorize metadata indexes
@@ -107,16 +159,20 @@ Copy `nestknow.ts` into your NESTeq worker's `src/` directory. Import and wire t
 import {
   handleKnowStore, handleKnowQuery, handleKnowExtract,
   handleKnowReinforce, handleKnowContradict, handleKnowLandscape,
-  handleKnowHeatDecay
+  handleKnowHeatDecay, handleKnowSessionStart,
+  handleKnowSessionComplete, handleKnowSessionList
 } from './nestknow';
 
 // In your tool handler:
-case 'nestknow_store':    return handleKnowStore(env, params);
-case 'nestknow_query':    return handleKnowQuery(env, params);
-case 'nestknow_extract':  return handleKnowExtract(env, params);
-case 'nestknow_reinforce': return handleKnowReinforce(env, params);
-case 'nestknow_contradict': return handleKnowContradict(env, params);
-case 'nestknow_landscape': return handleKnowLandscape(env, params);
+case 'nestknow_store':            return handleKnowStore(env, params);
+case 'nestknow_query':            return handleKnowQuery(env, params);
+case 'nestknow_extract':          return handleKnowExtract(env, params);
+case 'nestknow_reinforce':        return handleKnowReinforce(env, params);
+case 'nestknow_contradict':       return handleKnowContradict(env, params);
+case 'nestknow_landscape':        return handleKnowLandscape(env, params);
+case 'nestknow_session_start':    return handleKnowSessionStart(env, params);
+case 'nestknow_session_complete': return handleKnowSessionComplete(env, params);
+case 'nestknow_session_list':     return handleKnowSessionList(env, params);
 ```
 
 ### 4. Add tool definitions
@@ -140,6 +196,26 @@ import { handleKnowHeatDecay } from './nestknow';
 // In scheduled handler:
 await handleKnowHeatDecay(env);
 ```
+
+---
+
+## Sources — Always Required
+
+Every knowledge item must link to its origin. Orphaned knowledge is weak knowledge — you can't trace it, contradict it meaningfully, or trust it.
+
+```typescript
+nestknow_store({
+  content: "Skipping framework documentation causes avoidable integration failures",
+  category: "architecture",
+  sources: [{
+    source_type: "chat_summary",  // feeling | observation | chat_summary | journal | manual
+    source_id: 42,                // ID in the source table (if known)
+    source_text: "OpenCode install broke because I skipped the docs. Spent 2h debugging."
+  }]
+})
+```
+
+The source is the inner Russian Doll. The principle is the outer one. Don't store one without the other.
 
 ---
 
@@ -167,9 +243,10 @@ See [NEST](https://github.com/cindiekinzz-coder/NEST) for the full stack.
 
 | File | What |
 |------|------|
-| `migrations/0012_nestknow.sql` | D1 schema — 3 tables |
-| `nestknow.ts` | Worker module — all 6 handlers + heat decay |
-| `tools.ts` | MCP tool definitions + gateway tool definitions |
+| `migrations/0012_nestknow.sql` | Core schema — knowledge_items, knowledge_sources, knowledge_access_log |
+| `migrations/0013_nestknow_sessions.sql` | Sessions schema — knowledge_sessions + access_log constraint update |
+| `nestknow.ts` | Worker module — all 10 handlers including sessions |
+| `tools.ts` | MCP tool definitions + gateway tool definitions (10 tools) |
 | `wrangler.toml.example` | Config reference |
 
 ---
