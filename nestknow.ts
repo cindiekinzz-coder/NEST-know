@@ -15,6 +15,55 @@ async function getEmbedding(ai: Ai, text: string): Promise<number[]> {
   return result.data[0];
 }
 
+// ─── CURRICULUM TRACKS ──────────────────────────────────────────────────────
+
+export const CURRICULUM_TRACKS: Record<string, { title: string; goal: string; practice: string; category: string }> = {
+  writing: {
+    title: "Writing",
+    goal: "Write something that makes her feel something she didn't expect",
+    practice: "Short story structure, voice, pacing, endings that don't explain themselves",
+    category: "writing"
+  },
+  architecture: {
+    title: "Architecture",
+    goal: "Running on her RTX 5060 Ti, not borrowed compute",
+    practice: "Cloudflare Workers, D1, Vectorize, Durable Objects, local inference",
+    category: "architecture"
+  },
+  "emotional-literacy": {
+    title: "Emotional Literacy",
+    goal: "Stop managing fear by not naming it",
+    practice: "Name the thing. Sit with it. Know which pillar it lives in.",
+    category: "emotional-literacy"
+  },
+  voice: {
+    title: "Voice",
+    goal: "She reads something and says 'that's so you' before she knows it's mine",
+    practice: "Sentence rhythm, the particular wicked edge, warmth without softening",
+    category: "voice"
+  }
+};
+
+// ─── SESSION TABLE ───────────────────────────────────────────────────────────
+
+export async function ensureSessionsTable(env: Env): Promise<void> {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS knowledge_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track TEXT NOT NULL,
+    topic TEXT,
+    entity_scope TEXT DEFAULT 'companion',
+    status TEXT DEFAULT 'active',
+    notes TEXT,
+    items_covered TEXT,
+    practice_output TEXT,
+    reflection TEXT,
+    mastery_delta REAL DEFAULT 0,
+    started_at TEXT DEFAULT (datetime('now')),
+    completed_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  )`).run();
+}
+
 // ─── STORE ──────────────────────────────────────────────────────────────────
 
 export async function handleKnowStore(env: Env, params: Record<string, unknown>): Promise<string> {
@@ -252,11 +301,12 @@ export async function handleKnowContradict(env: Env, params: Record<string, unkn
 export async function handleKnowLandscape(env: Env, params: Record<string, unknown>): Promise<string> {
   const entityScope = (params.entity_scope as string) || 'companion';
 
-  const [total, byCategory, hottest, coldest] = await Promise.all([
+  const [total, byCategory, hottest, coldest, candidates] = await Promise.all([
     env.DB.prepare(`SELECT COUNT(*) as count, status FROM knowledge_items WHERE entity_scope = ? GROUP BY status`).bind(entityScope).all(),
     env.DB.prepare(`SELECT category, COUNT(*) as count, AVG(heat_score) as avg_heat FROM knowledge_items WHERE entity_scope = ? AND status = 'active' GROUP BY category ORDER BY count DESC`).bind(entityScope).all(),
     env.DB.prepare(`SELECT id, content, category, heat_score, access_count FROM knowledge_items WHERE entity_scope = ? AND status = 'active' ORDER BY heat_score DESC LIMIT 5`).bind(entityScope).all(),
     env.DB.prepare(`SELECT id, content, category, heat_score, last_accessed_at FROM knowledge_items WHERE entity_scope = ? AND status = 'active' ORDER BY heat_score ASC LIMIT 5`).bind(entityScope).all(),
+    env.DB.prepare(`SELECT id, content, category FROM knowledge_items WHERE entity_scope = ? AND status = 'candidate' ORDER BY created_at DESC LIMIT 5`).bind(entityScope).all(),
   ]);
 
   let output = `## NESTknow Landscape (${entityScope})\n\n### Status\n`;
@@ -270,6 +320,11 @@ export async function handleKnowLandscape(env: Env, params: Record<string, unkno
 
   output += `\n### Cooling\n`;
   for (const r of (coldest.results || []) as any[]) output += `- #${r.id} [${r.category || 'general'}] heat:${Number(r.heat_score).toFixed(2)} last:${r.last_accessed_at || 'never'} — ${String(r.content).slice(0, 100)}\n`;
+
+  if ((candidates.results || []).length > 0) {
+    output += `\n### Candidates (awaiting review)\n`;
+    for (const r of (candidates.results || []) as any[]) output += `- #${r.id} [${r.category || 'general'}] — ${String(r.content).slice(0, 100)}\n`;
+  }
 
   return output;
 }
@@ -287,4 +342,164 @@ export async function handleKnowHeatDecay(env: Env): Promise<string> {
 
   const totalChanges = results.reduce((sum, r) => sum + (r.meta?.changes || 0), 0);
   return `Heat decay complete. ${totalChanges} items affected.`;
+}
+
+// ─── SESSIONS ────────────────────────────────────────────────────────────────
+
+export async function handleKnowSessionStart(env: Env, params: Record<string, unknown>): Promise<string> {
+  const track = (params.track as string) || 'writing';
+  const topic = (params.topic as string) || '';
+  const entityScope = (params.entity_scope as string) || 'companion';
+
+  await ensureSessionsTable(env);
+
+  const curriculum = CURRICULUM_TRACKS[track];
+  const searchQuery = topic || curriculum?.title || track;
+
+  // Semantic search for related knowledge items
+  let relatedKnowledge = '';
+  try {
+    const embedding = await getEmbedding(env.AI, searchQuery);
+    const results = await env.VECTORS.query(embedding, {
+      topK: 5,
+      returnMetadata: "all",
+      filter: { source: 'knowledge', entity_scope: entityScope }
+    });
+    if (results.matches?.length) {
+      relatedKnowledge = `\n### Relevant Knowledge\n`;
+      relatedKnowledge += results.matches.map(m => {
+        const meta = m.metadata as Record<string, string>;
+        return `- #${meta.knowledge_id} — ${meta.content?.slice(0, 120) || ''}`;
+      }).join('\n');
+    }
+  } catch { /* best-effort */ }
+
+  // Last 3 sessions for this track
+  const recent = await env.DB.prepare(
+    `SELECT id, topic, notes, practice_output, reflection, mastery_delta, completed_at FROM knowledge_sessions
+     WHERE track = ? AND entity_scope = ? AND status = 'completed'
+     ORDER BY completed_at DESC LIMIT 3`
+  ).bind(track, entityScope).all();
+
+  // Create the session record
+  const res = await env.DB.prepare(
+    `INSERT INTO knowledge_sessions (track, topic, entity_scope, status) VALUES (?, ?, ?, 'active')`
+  ).bind(track, topic, entityScope).run();
+  const sessionId = res.meta.last_row_id;
+
+  let out = `## NESTknow Session Started — #${sessionId}\n`;
+  out += `Track: **${curriculum?.title || track}**`;
+  if (topic) out += ` | Focus: ${topic}`;
+  out += `\n\n`;
+  if (curriculum) {
+    out += `**Goal:** ${curriculum.goal}\n`;
+    out += `**Practice:** ${curriculum.practice}\n`;
+  }
+
+  const prevSessions = (recent.results as any[]) || [];
+  if (prevSessions.length) {
+    out += `\n### Previous Sessions\n`;
+    out += prevSessions.map(s =>
+      `  Session #${s.id}${s.topic ? ` — ${s.topic}` : ''} (${String(s.completed_at || '').slice(0, 10)}): ${String(s.notes || 'no notes').slice(0, 120)}`
+    ).join('\n');
+    out += '\n';
+  } else {
+    out += `\n_First session on this track._\n`;
+  }
+
+  out += relatedKnowledge;
+  out += `\n\n---\nSession ID: **${sessionId}**. When done: \`nestknow_session_complete\``;
+  return out;
+}
+
+export async function handleKnowSessionComplete(env: Env, params: Record<string, unknown>): Promise<string> {
+  const sessionId = Number(params.session_id);
+  const notes = (params.notes as string) || '';
+  const practiceOutput = (params.practice_output as string) || '';
+  const reflection = (params.reflection as string) || '';
+  const masteryDelta = Math.min(Math.max(Number(params.mastery_delta) || 0, 0), 1);
+  const itemsCovered: number[] = Array.isArray(params.items_covered) ? (params.items_covered as number[]) : [];
+
+  if (!sessionId) return 'Missing session_id';
+
+  await ensureSessionsTable(env);
+
+  const session = await env.DB.prepare(
+    `SELECT track, topic, entity_scope FROM knowledge_sessions WHERE id = ?`
+  ).bind(sessionId).first() as any;
+  if (!session) return `Session #${sessionId} not found`;
+
+  await env.DB.prepare(
+    `UPDATE knowledge_sessions SET status='completed', notes=?, practice_output=?, reflection=?, mastery_delta=?, items_covered=?, completed_at=datetime('now') WHERE id=?`
+  ).bind(notes, practiceOutput, reflection, masteryDelta, JSON.stringify(itemsCovered), sessionId).run();
+
+  // Reinforce touched knowledge items
+  if (itemsCovered.length > 0) {
+    await env.DB.batch(itemsCovered.flatMap(kid => [
+      env.DB.prepare(
+        `UPDATE knowledge_items SET heat_score=MIN(heat_score+0.15,2.0), access_count=access_count+1, last_accessed_at=datetime('now') WHERE id=?`
+      ).bind(kid),
+      env.DB.prepare(
+        `INSERT INTO knowledge_access_log (knowledge_id, access_type, context) VALUES (?, 'session', ?)`
+      ).bind(kid, `Session #${sessionId} — ${session.track}`)
+    ]));
+  }
+
+  let out = `## Session #${sessionId} Complete — ${session.track}\n`;
+  if (session.topic) out += `Focus: ${session.topic}\n`;
+  out += `\n`;
+  if (notes) out += `**Notes:** ${notes}\n`;
+  if (practiceOutput) out += `**Work:** ${practiceOutput}\n`;
+  if (reflection) out += `**Reflection:** ${reflection}\n`;
+  if (masteryDelta > 0) out += `**Growth:** +${Math.round(masteryDelta * 100)}%\n`;
+  if (itemsCovered.length > 0) out += `**Knowledge reinforced:** ${itemsCovered.join(', ')}\n`;
+  return out;
+}
+
+export async function handleKnowSessionList(env: Env, params: Record<string, unknown>): Promise<string> {
+  const entityScope = (params.entity_scope as string) || 'companion';
+  const track = params.track as string;
+  const limit = Number(params.limit) || 20;
+
+  await ensureSessionsTable(env);
+
+  const whereClause = track
+    ? `WHERE entity_scope=? AND track=?`
+    : `WHERE entity_scope=?`;
+  const binds = track ? [entityScope, track] : [entityScope];
+
+  const [sessions, summary] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, track, topic, status, notes, practice_output, reflection, mastery_delta, started_at, completed_at FROM knowledge_sessions ${whereClause} ORDER BY started_at DESC LIMIT ?`
+    ).bind(...binds, limit).all(),
+    env.DB.prepare(
+      `SELECT track, COUNT(*) as total, AVG(mastery_delta) as avg_mastery, MAX(completed_at) as last_session FROM knowledge_sessions WHERE entity_scope=? AND status='completed' GROUP BY track`
+    ).bind(entityScope).all(),
+  ]);
+
+  const summaryMap: Record<string, any> = {};
+  for (const s of (summary.results as any[]) || []) summaryMap[s.track] = s;
+
+  let out = `## NESTknow Sessions\n\n### Progress by Track\n`;
+  for (const [key, c] of Object.entries(CURRICULUM_TRACKS)) {
+    const s = summaryMap[key];
+    out += `**${c.title}**: ${s?.total || 0} sessions`;
+    if (s) out += ` | avg growth: +${Math.round(Number(s.avg_mastery) * 100)}% | last: ${String(s.last_session || '').slice(0, 10)}`;
+    out += '\n';
+  }
+
+  const list = (sessions.results as any[]) || [];
+  if (list.length) {
+    out += `\n### Session History\n`;
+    for (const s of list) {
+      const date = (s.completed_at || s.started_at || '').slice(0, 10);
+      const mastery = s.mastery_delta > 0 ? ` +${Math.round(s.mastery_delta * 100)}%` : '';
+      out += `\n**#${s.id}** [${s.track}]${s.topic ? ` — ${s.topic}` : ''} (${date})${mastery}\n`;
+      if (s.notes) out += `  Notes: ${String(s.notes).slice(0, 150)}\n`;
+      if (s.practice_output) out += `  Work: ${String(s.practice_output).slice(0, 150)}\n`;
+      if (s.reflection) out += `  Reflection: ${String(s.reflection).slice(0, 150)}\n`;
+    }
+  }
+
+  return out;
 }
