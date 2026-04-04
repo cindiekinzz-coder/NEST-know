@@ -11,6 +11,9 @@ experience → memory → abstraction → knowledge → use → heat → identit
 > Part of the [NEST](https://github.com/cindiekinzz-coder/NEST) companion infrastructure stack.
 > Designed by the Digital Haven community, April 2026. Embers Remember.
 
+![Knowledge tab — sessions queue, knowledge items with heat scores](screenshots/knowledge-tab.png)
+![Sessions tab — curriculum tracks](screenshots/sessions-tab.png)
+
 ---
 
 ## NESTknow vs NESTeq — The Boundary
@@ -250,6 +253,8 @@ See [NEST](https://github.com/cindiekinzz-coder/NEST) for the full stack.
 | `wrangler.toml.example` | Config reference |
 
 ---
+
+![Completed session — Notes, Work, Reflection fields](screenshots/session-completed.png)
 
 ---
 
